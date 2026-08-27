@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-module", default="model_world_h1_v4")
     parser.add_argument("--model-class", default="WorldModelH1V4")
     parser.add_argument("--sparse-top-k", type=int, default=2048)
+    parser.add_argument("--cheb-order", type=int, default=3)
     parser.add_argument("--out", required=True)
     parser.add_argument(
         "--holdout-mode", choices=("official-overlap", "random", "none"),
@@ -426,6 +427,8 @@ def main() -> None:
     }
     if "sparse_top_k" in inspect.signature(model_class.__init__).parameters:
         model_config["sparse_top_k"] = args.sparse_top_k
+    if "cheb_order" in inspect.signature(model_class.__init__).parameters:
+        model_config["cheb_order"] = args.cheb_order
     model = model_class(**model_config).to(device)
     model.initialize_gene_embeddings(torch.from_numpy(features).to(device))
     optimizer = torch.optim.AdamW(

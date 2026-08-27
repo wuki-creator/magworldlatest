@@ -11,15 +11,24 @@ import torch.nn.functional as F
 from model_world_h1_v4 import WorldModelH1V4
 
 
-class SparseContextEncoder(nn.Module):
-    """Encode only the strongest control genes plus compact QC summaries."""
+class ParametricChebyshevSparseEncoder(nn.Module):
+    """Sparse top-k encoder with a learnable Chebyshev-style value filter.
 
-    def __init__(self, n_genes: int, d_z: int, d_hidden: int, top_k: int) -> None:
+    The recurrence acts on signed, normalized token amplitudes. It provides a
+    bounded multi-order polynomial filter without densifying the single-cell
+    profile or requiring an unverified external gene graph.
+    """
+
+    def __init__(self, n_genes: int, d_z: int, d_hidden: int, top_k: int,
+                 cheb_order: int = 3) -> None:
         super().__init__()
         if top_k <= 0 or top_k > n_genes:
             raise ValueError("sparse top_k must be between one and n_genes")
         self.n_genes = n_genes
         self.top_k = top_k
+        if cheb_order < 1:
+            raise ValueError("cheb_order must be positive")
+        self.cheb_order = cheb_order
         self.gene_tokens = nn.Embedding(n_genes, d_z)
         self.value_projection = nn.Sequential(
             nn.Linear(1, d_z), nn.SiLU(), nn.Linear(d_z, d_z)
@@ -31,6 +40,8 @@ class SparseContextEncoder(nn.Module):
             nn.Linear(d_hidden, d_z),
             nn.LayerNorm(d_z),
         )
+        self.cheb_coeff = nn.Parameter(torch.zeros(cheb_order + 1))
+        nn.init.constant_(self.cheb_coeff[0], 1.0)
 
     def forward(self, x_ctrl: torch.Tensor) -> torch.Tensor:
         values, indices = torch.topk(
@@ -38,7 +49,17 @@ class SparseContextEncoder(nn.Module):
         )
         signed_values = torch.gather(x_ctrl, 1, indices)
         tokens = self.gene_tokens(indices)
-        tokens = tokens * self.value_projection(signed_values.unsqueeze(-1))
+        amplitudes = signed_values / values.max(dim=1, keepdim=True).values.clamp_min(1e-6)
+        basis_prev = tokens
+        filtered = self.cheb_coeff[0] * basis_prev
+        if self.cheb_order >= 1:
+            basis = amplitudes.unsqueeze(-1) * tokens
+            filtered = filtered + self.cheb_coeff[1] * basis
+            for order in range(2, self.cheb_order + 1):
+                basis_next = 2.0 * amplitudes.unsqueeze(-1) * basis - basis_prev
+                filtered = filtered + self.cheb_coeff[order] * basis_next
+                basis_prev, basis = basis, basis_next
+        tokens = filtered * self.value_projection(signed_values.unsqueeze(-1))
         weights = values.sum(1, keepdim=True).clamp_min(1e-6)
         pooled = tokens.sum(1) / weights
         mean = x_ctrl.mean(1, keepdim=True)
@@ -47,16 +68,21 @@ class SparseContextEncoder(nn.Module):
         return self.output(torch.cat([pooled, mean, std, nonzero], dim=1))
 
 
+class SparseContextEncoder(ParametricChebyshevSparseEncoder):
+    """Backward-compatible name for the sparse Chebyshev encoder."""
+
+
 class WorldModelH1V6(WorldModelH1V4):
     """V4 magnetic field with sparse context and field-level context modulation."""
 
-    def __init__(self, *args, sparse_top_k: int = 2048, **kwargs) -> None:
+    def __init__(self, *args, sparse_top_k: int = 2048, cheb_order: int = 3, **kwargs) -> None:
         d_hidden = kwargs.get("d_hidden", args[3] if len(args) > 3 else 192)
         super().__init__(*args, **kwargs)
         self.sparse_top_k = sparse_top_k
         self.context_encoder = SparseContextEncoder(
             self.n_genes, self.d_z, d_hidden,
             sparse_top_k,
+            cheb_order,
         )
 
     def predict_delta(
