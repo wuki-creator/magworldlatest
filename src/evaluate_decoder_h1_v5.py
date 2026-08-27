@@ -18,6 +18,12 @@ import pandas as pd
 import scipy.sparse as sp
 import torch
 
+from distributional_decoder import (
+    build_distribution_reference,
+    distribution_metrics,
+    heterogeneous_bayesian_decode,
+    match_library_sizes,
+)
 from evaluate_decoder_h1_v4 import (
     CONTROL_LABEL,
     aggregate,
@@ -69,6 +75,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--panel-centering", nargs="+", type=float, default=(0.0, 0.5, 1.0)
     )
+    parser.add_argument(
+        "--library-match-strength", nargs="+", type=float, default=(0.0,)
+    )
+    parser.add_argument("--response-sigma", nargs="+", type=float, default=(0.0,))
+    parser.add_argument(
+        "--strict-all-genes",
+        action="store_true",
+        help="Run DE over every gene instead of a truth-assisted candidate subset.",
+    )
     parser.add_argument("--self-scale", type=float, default=1.38)
     parser.add_argument("--max-delta", type=float, default=2.0)
     parser.add_argument("--cells", type=int, default=400)
@@ -100,11 +115,44 @@ def proxy_score(row: dict[str, float]) -> float:
     )
 
 
-def config_key(config: tuple[int, float, float, float, float, float, float]) -> str:
-    top_k, scale, prior, agreement, penalty, expression_gate, panel_centering = config
+def strict_proxy_score(row: dict[str, float]) -> float:
+    """Map blind offline diagnostics to the six public leaderboard categories."""
+    expression_accuracy = 1.0 - min(row["lfc_nmae"], 2.0)
+    pds_proxy = (
+        row["cosine"] + row["direction_fidelity"] + row["signed_reach"]
+    ) / 3.0
+    mse_proxy = (row["cosine"] + expression_accuracy) / 2.0
+    return float(
+        (
+            pds_proxy
+            + mse_proxy
+            + row["jaccard"]
+            + expression_accuracy
+            + row["latent_fid_similarity"]
+            + row["reach"]
+        )
+        / 6.0
+    )
+
+
+def config_key(
+    config: tuple[int, float, float, float, float, float, float, float, float]
+) -> str:
+    (
+        top_k,
+        scale,
+        prior,
+        agreement,
+        penalty,
+        expression_gate,
+        panel_centering,
+        library_match,
+        response_sigma,
+    ) = config
     return (
         f"k={top_k},scale={scale:g},prior={prior:g},agree={agreement:g},"
-        f"uncert={penalty:g},expr={expression_gate:g},center={panel_centering:g}"
+        f"uncert={penalty:g},expr={expression_gate:g},center={panel_centering:g},"
+        f"library={library_match:g},sigma={response_sigma:g}"
     )
 
 
@@ -159,6 +207,8 @@ def main() -> None:
             args.uncertainty_penalty,
             args.expression_gate_scale,
             args.panel_centering,
+            args.library_match_strength,
+            args.response_sigma,
         )
     )
     results: dict[str, list[dict[str, float]]] = {
@@ -216,6 +266,9 @@ def main() -> None:
                 centered_mean_effect, _, _ = consensus_statistics(
                     centered_model_effects, weights, 0.0
                 )
+                distribution_reference = build_distribution_reference(
+                    base, truth, mean_effect
+                )
                 truth_hint = signature_effects[signature_index]
                 candidate_count = min(args.candidate_genes, len(genes) - 1)
                 predicted_candidates = np.argpartition(
@@ -227,22 +280,25 @@ def main() -> None:
                 truth_candidates = np.argpartition(
                     np.abs(truth_hint), -candidate_count
                 )[-candidate_count:]
-                candidates = np.unique(
-                    np.concatenate(
-                        [
-                            predicted_candidates,
-                            centered_candidates,
-                            truth_candidates,
-                            [target_index],
-                        ]
+                if args.strict_all_genes:
+                    candidates = np.arange(len(genes), dtype=np.int64)
+                else:
+                    candidates = np.unique(
+                        np.concatenate(
+                            [
+                                predicted_candidates,
+                                centered_candidates,
+                                truth_candidates,
+                                [target_index],
+                            ]
+                        )
                     )
-                )
                 truth_effect, truth_q = de_statistics(
                     truth, base, candidates, len(genes)
                 )
                 gene_mean = np.asarray(base.mean(0)).ravel().astype(np.float64)
                 target_rows_metrics: dict[str, dict[str, float]] = {}
-                for config_index, config in enumerate(configurations):
+                for config in configurations:
                     (
                         top_k,
                         scale,
@@ -251,6 +307,8 @@ def main() -> None:
                         penalty,
                         expression_gate,
                         panel_centering,
+                        library_match,
+                        response_sigma,
                     ) = config
                     model_effects = center_panel_effects(
                         panel_model_effects, panel_centering
@@ -268,14 +326,31 @@ def main() -> None:
                         penalty,
                         expression_gate,
                     )
-                    decoded = bayesian_decode(
-                        base,
-                        delta,
-                        gene_mean,
-                        np.random.default_rng(
-                            args.seed + 100_000 * signature_index + config_index
-                        ),
-                        prior,
+                    config_rng = np.random.default_rng(
+                        args.seed + 100_000 * signature_index
+                    )
+                    if response_sigma > 0:
+                        decoded = heterogeneous_bayesian_decode(
+                            base,
+                            delta,
+                            gene_mean,
+                            config_rng,
+                            np.random.default_rng(
+                                args.seed + 50_000_000 + 100_000 * signature_index
+                            ),
+                            prior,
+                            response_sigma,
+                        )
+                    else:
+                        decoded = bayesian_decode(
+                            base,
+                            delta,
+                            gene_mean,
+                            config_rng,
+                            prior,
+                        )
+                    decoded = match_library_sizes(
+                        decoded, base, library_match, config_rng
                     )
                     predicted_effect, predicted_q = de_statistics(
                         decoded, base, candidates, len(genes)
@@ -288,7 +363,8 @@ def main() -> None:
                         args.fdr,
                         args.min_effect,
                     )
-                    row["proxy_score"] = proxy_score(row)
+                    row.update(distribution_metrics(decoded, distribution_reference))
+                    row["proxy_score"] = strict_proxy_score(row)
                     key = config_key(config)
                     results[key].append(row)
                     target_rows_metrics[key] = row

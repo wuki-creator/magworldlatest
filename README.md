@@ -40,6 +40,7 @@ src/
   train_magworld_h1_v4.py          zero-shot training and calibration
   evaluate_decoder_h1_v4.py        distributional v4 decoder evaluation
   evaluate_decoder_h1_v5.py        v5 panel-centering/consensus grid
+  distributional_decoder.py        strict distribution diagnostics and optional cell heterogeneity
   predict_magworld_vcc2026_v4.py   published-v4 inference
   predict_magworld_vcc2026_v5.py   robust-consensus v5 inference
 tests/                              focused model and decoder tests
@@ -107,6 +108,32 @@ Package the generated raw-count file with the official VCC CLI after validating
 its contexts, targets, gene order, and cell counts.
 
 ## Validation snapshot
+
+## v6 distribution experiments
+
+The v6 evaluation adds a blind all-gene mode (`--strict-all-genes`) and reports
+latent PCA-FID, library-size distance, and detected-gene distance. Every decoder
+configuration uses the same random seed per target so comparisons do not include
+configuration-specific Monte Carlo noise.
+
+On the eight-target blind test-lock, matching decoded library sizes to controls
+was not useful:
+
+| Library match strength | Proxy | Latent FID |
+|---:|---:|---:|
+| 0 | 0.32275 | 10.733 |
+| 0.5 | 0.32217 | 10.743 |
+| 1.0 | 0.32221 | 10.750 |
+
+Cell-level response heterogeneity (`--response-sigma`) had a small test-lock
+gain at `0.30`, but the five-fold, 25-target aggregate was effectively tied:
+`0.25055` for sigma 0, `0.25061` for 0.15, and `0.25056` for 0.30. It remains
+experimental and is disabled by default.
+
+Lowering the decoder prior from 2.0 to 0.5 improved the eight-target blind
+proxy from `0.32276` to `0.32472` and reduced latent FID from `10.733` to
+`10.592`, but this has not yet completed an independent five-fold confirmation.
+The published/default configuration therefore remains `prior_strength=2.0`.
 
 The five-fold aggregate decoder proxy favored no panel centering:
 

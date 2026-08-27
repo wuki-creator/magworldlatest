@@ -16,6 +16,7 @@ import pandas as pd
 import scipy.sparse as sp
 import torch
 
+from distributional_decoder import heterogeneous_bayesian_decode, match_library_sizes
 from predict_magworld_vcc2026_v4 import (
     adata_genes,
     aligned_sparse,
@@ -42,6 +43,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--self-scale", type=float, default=1.38)
     parser.add_argument("--max-delta", type=float, default=2.0)
     parser.add_argument("--prior-strength", type=float, default=2.0)
+    parser.add_argument(
+        "--library-match-strength",
+        type=float,
+        default=0.0,
+        help="Move decoded cell library sizes toward controls; 0 disables.",
+    )
+    parser.add_argument(
+        "--response-sigma",
+        type=float,
+        default=0.0,
+        help="Log-normal cell-level perturbation heterogeneity; 0 disables.",
+    )
     parser.add_argument("--min-sign-agreement", type=float, default=0.0)
     parser.add_argument("--uncertainty-penalty", type=float, default=0.0)
     parser.add_argument(
@@ -263,7 +276,25 @@ def main() -> None:
                 args.expression_gate_scale,
             )
             rng = np.random.default_rng(args.seed + 10_000 * context_index + position)
-            decoded = bayesian_decode(base, delta, gene_mean, rng, args.prior_strength)
+            if args.response_sigma > 0:
+                decoded = heterogeneous_bayesian_decode(
+                    base,
+                    delta,
+                    gene_mean,
+                    rng,
+                    np.random.default_rng(
+                        args.seed + 1_000_000 + 10_000 * context_index + position
+                    ),
+                    args.prior_strength,
+                    args.response_sigma,
+                )
+            else:
+                decoded = bayesian_decode(
+                    base, delta, gene_mean, rng, args.prior_strength
+                )
+            decoded = match_library_sizes(
+                decoded, base, args.library_match_strength, rng
+            )
             matrices.append(decoded)
             obs_targets.extend([target] * args.cells_per_target)
             obs_contexts.extend([context] * args.cells_per_target)
@@ -308,6 +339,8 @@ def main() -> None:
     prediction.uns["uncertainty_penalty"] = args.uncertainty_penalty
     prediction.uns["panel_centering"] = args.panel_centering
     prediction.uns["expression_gate_scale"] = args.expression_gate_scale
+    prediction.uns["library_match_strength"] = args.library_match_strength
+    prediction.uns["response_sigma"] = args.response_sigma
     prediction.uns["diagnostics"] = diagnostics
     prediction.write_h5ad(args.out, compression="gzip", compression_opts=4)
     print(
