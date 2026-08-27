@@ -1,0 +1,44 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Challenge data, learned parameters, and generated predictions.
+data/
+vcc_data/
+checkpoints/
+predictions/
+results/
+*.h5ad
+*.vcc
+*.pt
+*.pth
+*.npy
+*.npz
+*.zip
+
+# Server maintenance helpers are not part of the reproducible model pipeline.
+src/_*.py
+src/gen_*.py
+src/guardian.sh
+src/full_guardian.sh
+src/prep_h1.py
+src/train_h1_only.py
+src/train_magworld_h1_full.py
+src/train_magworld_h1_small.py
+src/model_world.py
+src/model_world_h1.py
+src/predict_magworld_vcc2026.py
+src/evaluate_magworld_h1.py
+src/test_*.py
+
+# Root-level working copies retained locally for provenance.
+/evaluate_decoder_h1_v4.py
+/model_world_h1_v3.py
+/model_world_h1_v4.py
+/predict_magworld_vcc2026_v3.py
+/predict_magworld_vcc2026_v4.py
+/train_magworld_h1_v3.py
+/train_magworld_h1_v4.py
