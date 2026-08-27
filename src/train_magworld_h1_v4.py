@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import inspect
 import json
 import math
 import os
@@ -22,6 +23,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--official-perts", required=True)
     parser.add_argument("--gene-embeddings", required=True)
     parser.add_argument("--magworld-src", required=True)
+    parser.add_argument("--model-module", default="model_world_h1_v4")
+    parser.add_argument("--model-class", default="WorldModelH1V4")
+    parser.add_argument("--sparse-top-k", type=int, default=2048)
     parser.add_argument("--out", required=True)
     parser.add_argument(
         "--holdout-mode", choices=("official-overlap", "random", "none"),
@@ -408,7 +412,8 @@ def main() -> None:
     module_path = str(Path(args.magworld_src).resolve())
     if module_path not in sys.path:
         sys.path.insert(0, module_path)
-    WorldModelH1V4 = importlib.import_module("model_world_h1_v4").WorldModelH1V4
+    model_module = importlib.import_module(args.model_module)
+    model_class = getattr(model_module, args.model_class)
     model_config = {
         "n_genes": len(genes),
         "d_model": features.shape[1],
@@ -419,7 +424,9 @@ def main() -> None:
         "shared_bias_initial_scale": args.shared_bias_initial_scale,
         "normalize_context": args.normalize_context,
     }
-    model = WorldModelH1V4(**model_config).to(device)
+    if "sparse_top_k" in inspect.signature(model_class.__init__).parameters:
+        model_config["sparse_top_k"] = args.sparse_top_k
+    model = model_class(**model_config).to(device)
     model.initialize_gene_embeddings(torch.from_numpy(features).to(device))
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay

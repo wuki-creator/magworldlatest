@@ -35,6 +35,7 @@ but are not claimed as score improvements.
 ```text
 src/
   build_h1_signature_dataset.py    batch-matched H1 signatures
+  build_external_perturbation_signatures.py  compatible external CRISPRi/Perturb-seq adapter
   build_hybrid_gene_embeddings.py  scGPT + control co-expression features
   model_world_h1_v4.py             directed reciprocal world model
   train_magworld_h1_v4.py          zero-shot training and calibration
@@ -43,6 +44,7 @@ src/
   distributional_decoder.py        strict distribution diagnostics and optional cell heterogeneity
   predict_magworld_vcc2026_v4.py   published-v4 inference
   predict_magworld_vcc2026_v5.py   robust-consensus v5 inference
+  model_world_h1_v6.py              sparse-context magnetic model (experimental)
 tests/                              focused model and decoder tests
 ```
 
@@ -106,6 +108,30 @@ PYTHONPATH=src python src/predict_magworld_vcc2026_v5.py \
 
 Package the generated raw-count file with the official VCC CLI after validating
 its contexts, targets, gene order, and cell counts.
+
+## v6 sparse-context training
+
+The experimental v6 model keeps the directed reciprocal field but replaces the
+dense all-gene context encoder with a top-k sparse encoder and compact QC
+statistics. Context modulation is applied at the field level before decoding.
+Training still selects checkpoints by held-out validation objective and stops
+after `--patience` stale epochs:
+
+```bash
+PYTHONPATH=src python src/train_magworld_h1_v4.py \
+  --model-module model_world_h1_v6 --model-class WorldModelH1V6 \
+  --sparse-top-k 2048 --holdout-mode official-overlap \
+  --signatures data/h1_2025/h1_train_validation_signatures_v4.npz \
+  --official-perts data/h1_2025/h1_official_cv_fold0.csv \
+  --gene-embeddings data/vcc_gene_embeddings_hybrid_256.npy \
+  --magworld-src src --out checkpoints/magworld_h1_v6_fold0.pt
+```
+
+External data should only be adapted when it contains sparse raw counts and
+`target_gene`, `guide_id`, and `batch` annotations, plus a matched control
+label. Use `build_external_perturbation_signatures.py` to produce a separately
+tracked signature file; do not mix incompatible knockout, overexpression, bulk,
+or unpaired screens into the VCC training set.
 
 ## Validation snapshot
 
