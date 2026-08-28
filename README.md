@@ -13,8 +13,8 @@ excluded because they are large and may be access-controlled.
 
 The published v4 submission `magworld_h1_v4_directed_cv5_ensemble` used three
 full-data seeds with equal weights, `top_k=500`, `downstream_scale=2.0`, and
-`prior_strength=2.0`. At the time recorded, it ranked 183/272 with an overall
-scaled score of -0.0448.
+`prior_strength=2.0`. At the latest recorded status, it ranked 219 with an
+overall scaled score of -0.0448.
 
 The v5 code retains per-seed predictions and adds experimental inference
 switches that can:
@@ -36,6 +36,7 @@ but are not claimed as score improvements.
 src/
   build_h1_signature_dataset.py    batch-matched H1 signatures
   build_external_perturbation_signatures.py  compatible external CRISPRi/Perturb-seq adapter
+  build_cellclip_signatures.py     strict CellClip/scPerturb counts adapter
   build_hybrid_gene_embeddings.py  scGPT + control co-expression features
   model_world_h1_v4.py             directed reciprocal world model
   train_magworld_h1_v4.py          zero-shot training and calibration
@@ -132,6 +133,43 @@ External data should only be adapted when it contains sparse raw counts and
 label. Use `build_external_perturbation_signatures.py` to produce a separately
 tracked signature file; do not mix incompatible knockout, overexpression, bulk,
 or unpaired screens into the VCC training set.
+
+For the CellClip public normalized release, use the dedicated adapter. It reads
+raw integer UMI values from `layers["counts"]` (CSR or dense HDF5 storage), uses
+`obs["is_reference"]` as the authoritative control mask, balances guides, and
+matches controls by batch.
+The normalized `X` matrix is deliberately ignored:
+
+```bash
+PYTHONPATH=src python src/build_cellclip_signatures.py \
+  --h5ad data/external_scperturb/replogle2022_rpe1_day7.h5ad \
+  --genes vcc_data/gene_names.csv \
+  --out data/external_scperturb/replogle2022_rpe1_signatures.npz
+```
+
+Training can warm-start from a compatible checkpoint with
+`--init-checkpoint`. The default `--init-mode full` requires the complete model
+configuration to match. `--init-mode field-only` transfers only the magnetic
+and pair-response parameters so a new cell context encoder and calibration can
+be learned on H1. External checkpoints remain experimental and must beat a
+scratch run on the same held-out targets before they are used for prediction.
+
+### External transfer snapshot
+
+The CellClip/scPerturb adapter was validated on Adamson K562 CRISPRi and
+Replogle RPE1 CRISPRi. Multi-source pretraining marginally improved the RPE1
+random holdout (`0.62001` versus `0.61718` from RPE1 scratch), but the gain did
+not transfer to H1 fold 0:
+
+| H1 model and initialization | Matched scratch | Transfer result |
+|---|---:|---:|
+| v6 sparse, K562 + Adamson full init | 0.18604 | 0.14540 |
+| v6 sparse, K562 + Adamson + RPE1 full init | 0.18604 | 0.13303 |
+| v4 dense, K562 + Adamson field-only init | 0.23066 | 0.19902 |
+| v4 dense, K562 + Adamson + RPE1 field-only init | 0.23066 | 0.17998 |
+
+These external checkpoints are rejected for VCC prediction. Their high
+within-screen validation scores do not establish cross-cell-context transfer.
 
 ## Validation snapshot
 

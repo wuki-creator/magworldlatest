@@ -29,6 +29,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cheb-order", type=int, default=3)
     parser.add_argument("--out", required=True)
     parser.add_argument(
+        "--init-checkpoint",
+        help="Warm-start from a compatible MagWorld checkpoint before training.",
+    )
+    parser.add_argument(
+        "--init-mode",
+        choices=("full", "field-only"),
+        default="full",
+        help="Load the whole model or only transferable perturbation-field weights.",
+    )
+    parser.add_argument(
         "--holdout-mode", choices=("official-overlap", "random", "none"),
         default="official-overlap",
     )
@@ -431,6 +441,57 @@ def main() -> None:
         model_config["cheb_order"] = args.cheb_order
     model = model_class(**model_config).to(device)
     model.initialize_gene_embeddings(torch.from_numpy(features).to(device))
+    initialization: dict[str, object] | None = None
+    if args.init_checkpoint:
+        init_path = Path(args.init_checkpoint)
+        source = torch.load(init_path, map_location=device, weights_only=False)
+        source_genes = np.asarray(source.get("genes", []), dtype=str)
+        if not np.array_equal(source_genes, genes):
+            raise ValueError(
+                "initialization checkpoint gene order differs from the signature dataset"
+            )
+        source_config = source.get("model_config", {})
+        compared_keys = (
+            model_config.keys()
+            if args.init_mode == "full"
+            else ("n_genes", "d_model", "d_z", "d_hidden", "directed_magnetic")
+        )
+        incompatible = {
+            key: (source_config.get(key), value)
+            for key in compared_keys
+            if (value := model_config.get(key)) is not None
+            if source_config.get(key) != value
+        }
+        if incompatible:
+            raise ValueError(
+                f"initialization checkpoint model config is incompatible: {incompatible}"
+            )
+        if args.init_mode == "full":
+            transferred_state = source["model_state"]
+            model.load_state_dict(transferred_state, strict=True)
+        else:
+            transferable_prefixes = ("magnet.", "source_code.", "receiver_code.")
+            transferable_names = {"receiver_residual", "magnetic_mix"}
+            target_state = model.state_dict()
+            transferred_state = {
+                key: value
+                for key, value in source["model_state"].items()
+                if (key.startswith(transferable_prefixes) or key in transferable_names)
+                and key in target_state
+                and value.shape == target_state[key].shape
+            }
+            if not transferred_state:
+                raise ValueError("initialization checkpoint has no transferable field weights")
+            model.load_state_dict(transferred_state, strict=False)
+        initialization = {
+            "checkpoint": str(init_path),
+            "mode": args.init_mode,
+            "transferred_parameters": sorted(transferred_state),
+            "best_epoch": source.get("best_epoch"),
+            "best_validation": source.get("best_validation"),
+            "features_path": source.get("features_path"),
+        }
+        print(json.dumps({"initialization": initialization}), flush=True)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
     )
@@ -576,6 +637,7 @@ def main() -> None:
                 "checkpoint_selection": (
                     "last_epoch" if args.holdout_mode == "none" else "validation_objective"
                 ),
+                "initialization": initialization,
                 "history": history,
                 "training_args": vars(args),
             }
